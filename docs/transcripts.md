@@ -43,6 +43,10 @@ with timestamp decoding, language detection and word times from cross-attention 
 `filmcraft_speech::whisper` module docs). Speakers are labelled by clustering per-chunk MFCC
 statistics (`filmcraft_speech::diarize`); no model is involved.
 
+Transcription preserves the spoken language; it does not translate into English. Language
+auto-detection is enabled by default. An explicit `language=auto` also overrides a saved fixed
+language preference; for difficult recordings, choose the known source language (e.g. `zh`).
+
 Both are **optional features**, off by default and never built for the web:
 
 - `whisper` (on `filmcraft-speech`, `filmcraft-engine`, and the `filmcraft` / `filmcraft-cli`
@@ -64,6 +68,10 @@ Weights are **never** bundled or committed. They are downloaded on request into
 `<data dir>/models/<id>/` (see `filmcraft_engine::autosave::default_data_dir`), each file pinned to a
 revision of OpenAI's Hugging Face repositories and checked against its SHA-256:
 
+With speech recognition and downloads enabled, clicking Transcribe automatically downloads a
+missing model and then continues transcription. Installed models are reused. A download failure
+leaves the project unchanged; retry Transcribe after fixing the connection or freeing disk space.
+
 | Id | Languages | Licence |
 |---|---|---|
 | `whisper-tiny` | multilingual | MIT (OpenAI); HF conversion Apache-2.0 |
@@ -82,6 +90,10 @@ Apple-silicon laptop CPU).
 
 ## Limits
 
-- Transcription runs synchronously inside the command (no background job or progress bar yet).
+- The desktop Text panel and Transcribe Sequence menu run transcription in a background job with
+  status-bar progress and cancellation. Commands accept `wait=false` for the same behaviour
+  (`jobs.list` / `jobs.cancel`); the default `wait=true` keeps synchronous script compatibility.
+  Results are committed as one undo step. If the project changes during transcription, results
+  are discarded with an error asking you to retry, so newer edits cannot be overwritten.
 - Track items that refer to a subclip are looked up by the subclip's id, so a transcript made for
   the parent media is not shown through subclip clips yet.

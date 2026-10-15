@@ -9,7 +9,7 @@
 //! engine feature `whisper`; without it `transcript.generate` fails with a clear error, and agents
 //! can still bring their own transcript with `transcript.set`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, atomic::Ordering};
 
 use serde_json::{Value, json};
 
@@ -127,8 +127,24 @@ fn speech_err(e: SpeechError) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
+/// First use installs missing weights, then retries loading. Other load errors must not cause
+/// network requests, and a failed download must stop transcription without changing the project.
+#[cfg(any(feature = "speech-download", test))]
+pub(super) fn load_with_download<T>(
+    mut load: impl FnMut() -> std::result::Result<T, SpeechError>,
+    download: impl FnOnce() -> std::result::Result<(), SpeechError>,
+) -> std::result::Result<T, SpeechError> {
+    match load() {
+        Err(SpeechError::NotInstalled(_)) => {
+            download()?;
+            load()
+        }
+        result => result,
+    }
+}
+
 /// The transcriber to use: the installed one, else the named catalogue model.
-fn transcriber(s: &Session, p: &Value) -> Result<Arc<dyn Transcriber>> {
+fn transcriber(s: &Session, p: &Value, _progress: Option<&filmcraft_export::Progress>) -> Result<Arc<dyn Transcriber>> {
     if let Some(t) = &s.transcriber {
         return Ok(t.clone());
     }
@@ -141,15 +157,49 @@ fn transcriber(s: &Session, p: &Value) -> Result<Arc<dyn Transcriber>> {
         return Err(EngineError::Other(NO_SPEECH.into()));
     }
     let dir = models_dir().ok_or_else(|| EngineError::Other("no data directory for speech models".into()))?;
+    #[cfg(feature = "speech-download")]
+    return load_with_download(
+        || filmcraft_speech::load(&dir, model),
+        || {
+            let m = filmcraft_speech::models::find(model).ok_or_else(|| SpeechError::UnknownModel(model.into()))?;
+            filmcraft_speech::models::download(&dir, m, &mut |done, total, _| update_progress(_progress, done, total, "Downloading speech model")).map_err(
+                |e| {
+                    SpeechError::Download(format!(
+                        "could not install speech model `{model}`; check the connection and available disk space, then retry Transcribe: {e}"
+                    ))
+                },
+            )
+        },
+    )
+    .map_err(speech_err);
+    #[cfg(not(feature = "speech-download"))]
     filmcraft_speech::load(&dir, model).map_err(speech_err)
 }
 
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {
+    if !bool_p(p, "wait").unwrap_or(true) {
+        return start_background(s, p);
+    }
+    generate_inner(s, p, None)
+}
+
+fn update_progress(progress: Option<&filmcraft_export::Progress>, done: u64, total: u64, status: &str) -> bool {
+    let Some(progress) = progress else { return true };
+    progress.total.store(total.max(1), Ordering::Relaxed);
+    progress.done.store(done, Ordering::Relaxed);
+    *progress.status.lock().unwrap_or_else(|e| e.into_inner()) = status.into();
+    !progress.cancel.load(Ordering::Relaxed)
+}
+
+fn generate_inner(s: &mut Session, p: &Value, progress: Option<&filmcraft_export::Progress>) -> Result<Value> {
     let items = targets(s, p);
     if items.is_empty() {
         return Err(bad("transcript.generate", "nothing to transcribe (pass `items`, select clips, or open a sequence with audio)"));
     }
-    let t = transcriber(s, p)?;
+    if !update_progress(progress, 0, 1, "Loading speech model") {
+        return Err(speech_err(SpeechError::Cancelled));
+    }
+    let t = transcriber(s, p, progress)?;
     // Settings ▸ Media Analysis & Transcription: language (or auto-detect) and speaker labelling
     let ma = &s.prefs.media_analysis;
     let default_language = if ma.language_auto_detect { None } else { Some(ma.default_language.clone()) };
@@ -163,17 +213,30 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let mut done: Vec<(ItemId, Transcript)> = Vec::new();
     let mut skipped = Vec::new();
-    for item in items {
+    let total = (items.len() as u64).saturating_mul(1000);
+    for (index, item) in items.into_iter().enumerate() {
+        let base = (index as u64).saturating_mul(1000);
+        if !update_progress(progress, base, total, "Reading audio") {
+            return Err(speech_err(SpeechError::Cancelled));
+        }
         let Some(audio) = item_audio(s, item) else {
             skipped.push(item.0);
             continue;
         };
-        let mut tr = t.transcribe(&audio, &opts, &mut |_, _| true).map_err(speech_err)?;
+        let mut tr = t
+            .transcribe(&audio, &opts, &mut |fraction, _| {
+                let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+                update_progress(progress, base.saturating_add((fraction * 1000.0) as u64), total, "Transcribing")
+            })
+            .map_err(speech_err)?;
         tr.normalize();
         done.push((item, tr));
     }
     if done.is_empty() {
         return Err(EngineError::Other("none of the clips has audio to transcribe".into()));
+    }
+    if progress.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) {
+        return Err(speech_err(SpeechError::Cancelled));
     }
     let report: Vec<Value> = done
         .iter()
@@ -186,6 +249,111 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"items": report, "skipped": skipped}))
+}
+
+type TranscriptOutput = std::result::Result<Vec<(ItemId, Arc<Transcript>)>, String>;
+
+pub struct PendingTranscript {
+    job: u64,
+    project: Arc<filmcraft_project::Project>,
+    output: Arc<Mutex<Option<TranscriptOutput>>>,
+}
+
+fn start_background(s: &mut Session, p: &Value) -> Result<Value> {
+    if cfg!(target_arch = "wasm32") {
+        return Err(EngineError::Other("background speech recognition is not supported in this build".into()));
+    }
+    if !s.transcript_jobs.is_empty() {
+        return Err(EngineError::Other("transcription is already running; wait or cancel it first".into()));
+    }
+    let items = targets(s, p);
+    if items.is_empty() {
+        return Err(bad("transcript.generate", "nothing to transcribe"));
+    }
+    let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0).checked_add(1).ok_or_else(|| EngineError::Other("too many jobs".into()))?;
+    let job = crate::Job { id, label: "Transcribing".into(), progress: Default::default(), result: Default::default() };
+    update_progress(Some(&job.progress), 0, 1, "Loading speech model");
+    let output: Arc<Mutex<Option<TranscriptOutput>>> = Arc::default();
+    let pending = PendingTranscript { job: id, project: s.project.clone(), output: output.clone() };
+    let (project, media, services, prefs, recogniser) = (s.project.clone(), s.media.clone(), s.services.clone(), s.prefs.clone(), s.transcriber.clone());
+    let mut params = Value::Object(p.as_object().cloned().ok_or_else(|| bad("transcript.generate", "parameters must be an object"))?);
+    params["items"] = json!(items.iter().map(|i| i.0).collect::<Vec<_>>());
+    let progress = job.progress.clone();
+    let run = move || {
+        let mut worker = Session::new(services);
+        worker.project = project;
+        worker.media = media;
+        worker.prefs = prefs;
+        worker.transcriber = recogniser;
+        let result = generate_inner(&mut worker, &params, Some(&progress))
+            .map(|_| items.into_iter().filter_map(|id| worker.project.transcripts.get(&id).map(|t| (id, t.clone()))).collect())
+            .map_err(|e| e.to_string());
+        *output.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+    };
+    let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
+    std::thread::Builder::new()
+        .name("filmcraft-transcribe".into())
+        .spawn(run)
+        .map_err(|e| EngineError::Other(format!("could not start transcription: {e}")))?;
+    s.jobs.push(job);
+    s.transcript_jobs.push(pending);
+    Ok(json!({"job": id}))
+}
+
+/// Commit completed transcription on the session thread, retaining a single undo step.
+pub fn poll(s: &mut Session) {
+    let mut index = 0;
+    while index < s.transcript_jobs.len() {
+        let pending = &s.transcript_jobs[index];
+        let Some(job) = s.jobs.iter().find(|j| j.id == pending.job).cloned() else {
+            s.transcript_jobs.remove(index);
+            continue;
+        };
+        let output = pending.output.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let result = match output {
+            Some(output) => output,
+            None if job.progress.finished.load(Ordering::Relaxed) => {
+                if let Some(Err(error)) = job.result.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    s.error_toast("transcript.generate", error);
+                }
+                s.transcript_jobs.remove(index);
+                continue;
+            }
+            None => {
+                index += 1;
+                continue;
+            }
+        };
+        let pending = s.transcript_jobs.remove(index);
+        let result = if job.progress.cancel.load(Ordering::Relaxed) {
+            Err("transcription cancelled".into())
+        } else if !Arc::ptr_eq(&s.project, &pending.project) {
+            Err("project changed during transcription; retry Transcribe".into())
+        } else {
+            result.and_then(|transcripts| {
+                s.edit("Transcribe", move |project, _| {
+                    for (id, transcript) in transcripts {
+                        project.transcripts.insert(id, transcript);
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())
+            })
+        };
+        let report = match result {
+            Ok(()) => {
+                s.toast("Transcription complete");
+                Ok(filmcraft_export::Report { path: String::new(), frames: 0, seconds: 0.0, bytes: 0, render_fps: 0.0, extra_files: Vec::new() })
+            }
+            Err(error) => {
+                *job.progress.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+                s.error_toast("transcript.generate", error.clone());
+                Err(error)
+            }
+        };
+        *job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+        job.progress.finished.store(true, Ordering::Relaxed);
+    }
 }
 
 fn set(s: &mut Session, p: &Value) -> Result<Value> {
@@ -439,7 +607,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "transcript.generate",
             "Transcribe…",
             &["Sequence", "Transcript"],
-            r#"{"items":[id]?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?}"#,
+            r#"{"items":[id]?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?,"wait":bool=true}"#,
             can_transcribe,
             generate,
             true,

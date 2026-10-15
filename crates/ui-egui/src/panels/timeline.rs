@@ -9,7 +9,7 @@
 //! damped exponential easing, anchored under the cursor) so navigation feels fluid; all geometry is
 //! drawn as GPU meshes by egui's wgpu backend and culled to the visible range.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -60,8 +60,24 @@ pub struct TlState {
     /// display gain: scanning the whole source per clip per frame cost more than drawing.
     peak_max: HashMap<PeakKey, (usize, f32)>,
     zoom_anchor: Option<(f64, f32)>,
+    /// Secondary-button range navigation, separate from clip-editing drags.
+    range_zoom: Option<RangeZoom>,
+    range_zoom_consumed: bool,
+    /// Bounded navigation history per sequence; never part of edit undo.
+    range_zoom_history: HashMap<ItemId, VecDeque<(f64, f64)>>,
     /// The zoom (points a second) the video thumbnails are laid out at while the view is zooming (#1094).
     thumb_pps: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+struct RangeZoom {
+    sequence: ItemId,
+    origin: Pos2,
+    start: Tick,
+    end: Tick,
+    delta_x: f32,
+    active: bool,
+    cancelled: bool,
 }
 
 impl TlState {
@@ -74,6 +90,8 @@ impl TlState {
         self.seq_peak_keys = Default::default();
         self.seq_keys_seen.clear();
         self.peak_max.clear();
+        self.range_zoom_history.clear();
+        self.range_zoom = None;
     }
 }
 
@@ -292,6 +310,128 @@ pub fn zoom_about(v: &mut TimelineView, factor: f64, anchor_secs: f64, width: f3
     let x = if (0.0..=width).contains(&x) { x } else { width / 2.0 };
     v.target_pps = new;
     v.target_scroll = (anchor_secs - x as f64 / new).max(0.0);
+}
+
+/// Fit a time range to the visible tracks. Invalid control-channel parameters leave the view alone.
+pub fn zoom_to_range(v: &mut TimelineView, start: Tick, end: Tick, width: f32) -> Result<(), String> {
+    let (start, end) = (start.min(end), start.max(end));
+    if start < Tick::ZERO || !width.is_finite() || width <= 0.0 {
+        return Err("zoom range must be non-negative and the timeline must have a visible width".into());
+    }
+    let duration = end.0.checked_sub(start.0).filter(|d| *d > 0).ok_or("zoom range must have a positive duration")?;
+    let pps = f64::from(width) / Tick(duration).seconds();
+    if !pps.is_finite() || pps <= 0.0 {
+        return Err("invalid zoom range".into());
+    }
+    v.fit_pending = false;
+    v.target_pps = pps.clamp(0.05, 24_000.0);
+    v.target_scroll = start.seconds();
+    Ok(())
+}
+
+pub fn zoom_range(app: &mut FilmcraftApp, start: Tick, end: Tick) -> Result<(), String> {
+    let sequence = app.session.state.active_sequence.ok_or("open a sequence before zooming")?;
+    let before = (app.ui.timeline.target_pps, app.ui.timeline.target_scroll);
+    zoom_to_range(&mut app.ui.timeline, start, end, app.last_timeline_width)?;
+    if before != (app.ui.timeline.target_pps, app.ui.timeline.target_scroll)
+        && before.0.is_finite()
+        && before.0 > 0.0
+        && before.1.is_finite()
+        && before.1 >= 0.0
+    {
+        // Bound both dimensions even for projects with thousands of sequences.
+        if !app.tl.range_zoom_history.contains_key(&sequence)
+            && app.tl.range_zoom_history.len() >= 64
+            && let Some(old) = app.tl.range_zoom_history.keys().next().copied()
+        {
+            app.tl.range_zoom_history.remove(&old);
+        }
+        let history = app.tl.range_zoom_history.entry(sequence).or_default();
+        if history.len() >= 64 {
+            history.pop_front();
+        }
+        history.push_back(before);
+    }
+    app.tl.zoom_anchor = None;
+    Ok(())
+}
+
+pub fn zoom_back(app: &mut FilmcraftApp) -> Result<(), String> {
+    let sequence = app.session.state.active_sequence.ok_or("open a sequence before zooming")?;
+    app.tl.zoom_anchor = None;
+    if let Some((pps, scroll)) = app.tl.range_zoom_history.get_mut(&sequence).and_then(VecDeque::pop_back) {
+        let view = &mut app.ui.timeline;
+        view.fit_pending = false;
+        view.target_pps = pps;
+        view.target_scroll = scroll;
+    } else {
+        app.ui.timeline.fit_pending = true;
+    }
+    Ok(())
+}
+
+/// Return true while a right-drag owns the interaction, including its release, so it cannot
+/// also select, trim, scrub, or open a context menu. A right click keeps its ordinary menu.
+fn range_zoom_interact(app: &mut FilmcraftApp, ui: &egui::Ui, layout: &Layout, area: Rect, resp: &egui::Response) -> bool {
+    let ctx = ui.ctx();
+    let Some(sequence) = app.session.state.active_sequence else {
+        app.tl.range_zoom = None;
+        return false;
+    };
+    app.auto.add("timeline.zoomRange", area, "Right-drag to zoom to a time range");
+    if app.tl.drag.is_none()
+        && resp.contains_pointer()
+        && ctx.input(|i| i.pointer.secondary_pressed())
+        && let Some(origin) = ctx.input(|i| i.pointer.press_origin()).filter(|p| area.contains(*p))
+    {
+        let start = layout.tick_at(origin.x).max(Tick::ZERO);
+        app.tl.range_zoom = Some(RangeZoom { sequence, origin, start, end: start, delta_x: 0.0, active: false, cancelled: false });
+    }
+    let Some(mut drag) = app.tl.range_zoom.take() else { return false };
+    if drag.sequence != sequence || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        drag.cancelled = true;
+    }
+    if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()).filter(|p| p.x.is_finite()) {
+        let x = pos.x.max(area.left()).min(area.right());
+        drag.end = layout.tick_at(x).max(Tick::ZERO);
+        drag.delta_x = pos.x - drag.origin.x;
+        drag.active |= drag.delta_x.abs() >= 6.0;
+    }
+    let owns = drag.active || drag.cancelled;
+    if drag.active && !drag.cancelled {
+        ctx.set_cursor_icon(if drag.delta_x < 0.0 { CursorIcon::ZoomOut } else { CursorIcon::ZoomIn });
+        let a = layout.x_of(drag.start).max(area.left()).min(area.right());
+        let b = layout.x_of(drag.end).max(area.left()).min(area.right());
+        let selection = Rect::from_min_max(pos2(a.min(b), layout.ruler.top()), pos2(a.max(b), layout.ruler.bottom()));
+        let painter = ui.painter().with_clip_rect(layout.ruler);
+        painter.rect_filled(selection, 0.0, app.tokens.accent.gamma_multiply(0.18));
+        painter.rect_stroke(selection, 0.0, Stroke::new(1.5, app.tokens.accent), StrokeKind::Inside);
+        painter.line_segment(
+            [pos2(selection.left(), selection.bottom() - 2.0), pos2(selection.right(), selection.bottom() - 2.0)],
+            Stroke::new(3.0, app.tokens.accent),
+        );
+        app.auto.add("timeline.zoomRange.selection", selection, "Time range to zoom");
+        ctx.request_repaint();
+    }
+    if ctx.input(|i| i.pointer.secondary_released()) {
+        if drag.active && !drag.cancelled {
+            let command = if drag.delta_x <= -6.0 {
+                Some(("view.zoomBack", json!({})))
+            } else if drag.delta_x >= 6.0 && drag.end > drag.start {
+                Some(("view.zoomToRange", json!({"start": drag.start.0, "end": drag.end.0})))
+            } else {
+                None
+            };
+            if let Some((command, params)) = command
+                && let Err(error) = crate::menus::invoke(app, ctx, command, params)
+            {
+                app.ui.status = error;
+            }
+        }
+    } else if ctx.input(|i| i.pointer.secondary_down()) {
+        app.tl.range_zoom = Some(drag);
+    }
+    owns
 }
 
 fn label_color(app: &FilmcraftApp, l: filmcraft_project::Label) -> Color32 {
@@ -712,6 +852,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---- interaction
     interact(app, ui, seq, &layout, rect);
+    if app.tl.range_zoom_consumed {
+        return;
+    }
     super::timeline_volume::interact(app, ui, seq, &layout, aclip);
     // track keyframes (drawn and edited on top of the clips)
     super::timeline_automation::show(app, ui, seq, &layout, aclip);
@@ -2218,6 +2361,11 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     let ctx = ui.ctx().clone();
     let area = Rect::from_min_max(pos2(layout.content.min.x, layout.ruler.min.y), layout.content.max);
     let resp = ui.interact(area, egui::Id::new("timeline-area"), Sense::click_and_drag());
+    app.tl.range_zoom_consumed = false;
+    if range_zoom_interact(app, ui, layout, area, &resp) {
+        app.tl.range_zoom_consumed = true;
+        return;
+    }
     let pos = resp.hover_pos().or(resp.interact_pointer_pos());
     let mods = ctx.input(|i| i.modifiers);
     let tool = app.ui.tool;

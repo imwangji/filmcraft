@@ -22,6 +22,8 @@ macro_rules! uic {
 }
 
 pub const UI_COMMANDS: &[UiCommand] = &[
+    uic!("view.zoomToRange", "Zoom to Time Range", [], None),
+    uic!("view.zoomBack", "Return to Previous Timeline Zoom", [], None),
     uic!("window.dockAction", "Docking Action", [], None),
     uic!("window.dockPanel", "Dock Panel", [], None),
     uic!("window.floatPanel", "Undock Panel", [], None),
@@ -417,6 +419,18 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
             app.ui.timeline.fit_pending = true;
             return Ok(Value::Null);
         }
+        "view.zoomToRange" => {
+            let start = params.get("start").and_then(Value::as_i64).ok_or("zoom range needs integer `start` ticks")?;
+            let end = params.get("end").and_then(Value::as_i64).ok_or("zoom range needs integer `end` ticks")?;
+            crate::panels::timeline::zoom_range(app, filmcraft_time::Tick(start), filmcraft_time::Tick(end))?;
+            ctx.request_repaint();
+            return Ok(Value::Null);
+        }
+        "view.zoomBack" => {
+            crate::panels::timeline::zoom_back(app)?;
+            ctx.request_repaint();
+            return Ok(Value::Null);
+        }
         "mode.import" => {
             app.ui.mode = Mode::Import;
             return Ok(Value::Null);
@@ -583,6 +597,10 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         || (crate::EXPORT_SAVE_DIALOGS.iter().any(|(c, ..)| *c == id) && params.get("path").is_none())
     {
         return app.file_dialog(id, &params);
+    }
+    if matches!(id, "transcript.generate" | "sequence.transcribe") && params.get("wait").is_none() {
+        let object = params.as_object_mut().ok_or("transcription parameters must be an object")?;
+        object.insert("wait".into(), json!(false));
     }
     let r = app.session.execute(id, params).map_err(|e| e.to_string());
     if let Err(e) = &r {

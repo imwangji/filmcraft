@@ -7,6 +7,65 @@ use filmcraft_project::{ItemId, Transcript, Word};
 use filmcraft_speech::FixedTranscriber;
 use filmcraft_time::Tick;
 
+#[test]
+fn missing_speech_model_downloads_before_retrying_load() {
+    use filmcraft_speech::SpeechError;
+    use std::cell::Cell;
+
+    let installed = Cell::new(false);
+    let loads = Cell::new(0);
+    let downloads = Cell::new(0);
+    let result = crate::transcript::load_with_download(
+        || {
+            loads.set(loads.get() + 1);
+            if installed.get() { Ok("recogniser") } else { Err(SpeechError::NotInstalled("whisper-base".into())) }
+        },
+        || {
+            downloads.set(downloads.get() + 1);
+            installed.set(true);
+            Ok(())
+        },
+    );
+    assert_eq!(result.unwrap(), "recogniser");
+    assert_eq!(loads.get(), 2);
+    assert_eq!(downloads.get(), 1);
+}
+
+#[test]
+fn installed_or_invalid_speech_models_do_not_download() {
+    use filmcraft_speech::SpeechError;
+
+    for initial in [Ok("recogniser"), Err(SpeechError::Model("invalid weights".into())), Err(SpeechError::UnknownModel("../unknown".into()))] {
+        let mut downloaded = false;
+        let result = crate::transcript::load_with_download(
+            || initial.clone(),
+            || {
+                downloaded = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, initial);
+        assert!(!downloaded);
+    }
+}
+
+#[test]
+fn speech_model_download_failure_stops_without_retrying_load() {
+    use filmcraft_speech::SpeechError;
+
+    let mut loads = 0;
+    let error = SpeechError::Download("connection failed".into());
+    let result: Result<(), _> = crate::transcript::load_with_download(
+        || {
+            loads += 1;
+            Err(SpeechError::NotInstalled("whisper-base".into()))
+        },
+        || Err(error.clone()),
+    );
+    assert_eq!(result.unwrap_err(), error);
+    assert_eq!(loads, 1);
+}
+
 /// The demo project with a fake transcriber whose transcript fits the first A1 clip's media:
 /// "Hello um world." (Speaker 1), a 1.2 s pause, "Second speaker here." (Speaker 2).
 fn session() -> (Session, ItemId, Tick) {
@@ -32,6 +91,121 @@ fn session() -> (Session, ItemId, Tick) {
 
 fn a_start(s: &Session) -> Tick {
     s.active_sequence().unwrap().audio_tracks[0].items[0].start
+}
+
+#[test]
+fn transcription_defaults_to_source_language_and_auto_overrides_fixed_english() {
+    struct Languages(std::sync::Mutex<Vec<Option<String>>>);
+    impl filmcraft_speech::Transcriber for Languages {
+        fn id(&self) -> String {
+            "languages".into()
+        }
+        fn transcribe(
+            &self,
+            _: &[f32],
+            opts: &filmcraft_speech::Options,
+            _: filmcraft_speech::ProgressFn,
+        ) -> Result<Transcript, filmcraft_speech::SpeechError> {
+            self.0.lock().unwrap().push(opts.language.clone());
+            Ok(Transcript::default())
+        }
+    }
+    let (mut s, item, _) = session();
+    assert!(s.prefs.media_analysis.language_auto_detect, "source-language detection must be the default");
+    let received = Arc::new(Languages(std::sync::Mutex::new(Vec::new())));
+    s.transcriber = Some(received.clone());
+    s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    s.prefs.media_analysis.language_auto_detect = false;
+    s.prefs.media_analysis.default_language = "en".into();
+    s.execute("transcript.generate", json!({"items": [item.0], "language": "auto"})).unwrap();
+    s.execute("transcript.generate", json!({"items": [item.0], "language": "zh"})).unwrap();
+    assert_eq!(*received.0.lock().unwrap(), vec![None, None, Some("zh".into())]);
+}
+
+struct GatedTranscriber {
+    inner: Arc<dyn filmcraft_speech::Transcriber>,
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    panic: bool,
+}
+
+impl filmcraft_speech::Transcriber for GatedTranscriber {
+    fn id(&self) -> String {
+        "gated".into()
+    }
+
+    fn transcribe(
+        &self,
+        audio: &[f32],
+        opts: &filmcraft_speech::Options,
+        progress: filmcraft_speech::ProgressFn,
+    ) -> Result<Transcript, filmcraft_speech::SpeechError> {
+        self.started.send(()).unwrap();
+        self.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(!self.panic, "synthetic transcription worker panic");
+        self.inner.transcribe(audio, opts, progress)
+    }
+}
+
+fn finish_background(s: &mut Session) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !s.transcript_jobs.is_empty() {
+        s.poll_persistence();
+        assert!(std::time::Instant::now() < deadline, "transcription job did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn background_transcription_keeps_session_responsive_and_commits_atomically() {
+    for mode in ["complete", "cancel", "edit", "panic"] {
+        let (mut s, item, _) = session();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        s.transcriber = Some(Arc::new(GatedTranscriber {
+            inner: s.transcriber.take().unwrap(),
+            started: started_tx,
+            release: std::sync::Mutex::new(release_rx),
+            panic: mode == "panic",
+        }));
+        let before = s.project.clone();
+        let result = s.execute("transcript.generate", json!({"items": [item.0], "wait": false})).unwrap();
+        started_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(s.execute("transcript.inspect", json!({})).is_ok(), "commands remain usable while inference blocks");
+        assert!(s.project.transcripts.is_empty(), "no partial results");
+        assert!(s.execute("transcript.generate", json!({"items": [item.0], "wait": false})).is_err(), "duplicate jobs are rejected");
+        match mode {
+            "cancel" => {
+                s.execute("jobs.cancel", json!({"job": result["job"]})).unwrap();
+            }
+            "edit" => {
+                s.edit("Newer edit", |p, _| {
+                    p.name = "Keep my edits".into();
+                    Ok(())
+                })
+                .unwrap();
+            }
+            _ => {}
+        }
+        release_tx.send(()).unwrap();
+        finish_background(&mut s);
+        let job = s.jobs.iter().find(|j| Some(j.id) == result["job"].as_u64()).unwrap();
+        assert!(job.progress.finished.load(std::sync::atomic::Ordering::Relaxed));
+        if mode == "complete" {
+            assert!(job.result.lock().unwrap().as_ref().unwrap().is_ok());
+            assert_eq!(s.project.transcripts[&item].words.len(), 6);
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(*s.project, *before, "one undo restores the project");
+        } else {
+            assert!(job.result.lock().unwrap().as_ref().unwrap().is_err(), "{mode}");
+            assert!(s.project.transcripts.is_empty());
+            if mode == "edit" {
+                assert_eq!(s.project.name, "Keep my edits");
+            } else {
+                assert_eq!(*s.project, *before);
+            }
+        }
+    }
 }
 
 fn words(s: &mut Session) -> Vec<String> {

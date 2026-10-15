@@ -1,7 +1,7 @@
 //! The speech model catalogue and the model store.
 //!
-//! Models are downloaded on first use, after the user confirms (the dialog shows the size, the
-//! source URL and the licence), into `<data dir>/models/<id>/`. They are never bundled with
+//! Models are downloaded automatically on first transcription, or explicitly through the download
+//! command, into `<data dir>/models/<id>/`. They are never bundled with
 //! FilmCraft or committed to the repository. Every file is pinned to a Hugging Face revision of
 //! OpenAI's own repositories and checked against its SHA-256 before it is used.
 //!

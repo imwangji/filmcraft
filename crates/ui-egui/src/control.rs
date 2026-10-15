@@ -345,16 +345,21 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                 (Err(e), _) | (_, Err(e)) if e.starts_with(RETRY) => return Outcome::Retry(e.trim_start_matches(RETRY).to_string()),
                 (Err(e), _) | (_, Err(e)) => return err(e),
             };
-            let steps = p.get("steps").and_then(Value::as_u64).unwrap_or(12).max(2);
+            let steps = p.get("steps").and_then(Value::as_u64).unwrap_or(12).clamp(2, 1024);
+            let button = match s("button") {
+                Some("right") => egui::PointerButton::Secondary,
+                Some("middle") => egui::PointerButton::Middle,
+                _ => egui::PointerButton::Primary,
+            };
             let m = modifiers(p);
             app.synthetic.push(egui::Event::ModifiersChanged(m));
             app.synthetic.push(egui::Event::PointerMoved(a));
-            app.synthetic.push(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: m });
+            app.synthetic.push(egui::Event::PointerButton { pos: a, button, pressed: true, modifiers: m });
             for i in 1..=steps {
                 let f = i as f32 / steps as f32;
                 app.synthetic.push(egui::Event::PointerMoved(a + (b - a) * f));
             }
-            app.synthetic.push(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: m });
+            app.synthetic.push(egui::Event::PointerButton { pos: b, button, pressed: false, modifiers: m });
             app.synthetic.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
             Outcome::AfterInput
         }
