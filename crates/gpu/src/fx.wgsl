@@ -12,6 +12,12 @@ struct U {
     p3: vec4<f32>,
     p4: vec4<f32>,
     p5: vec4<f32>,
+    p6: vec4<f32>,
+    p7: vec4<f32>,
+    p8: vec4<f32>,
+    p9: vec4<f32>,
+    p10: vec4<f32>,
+    p11: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -50,6 +56,7 @@ const OP_MIRROR: u32 = 28u;
 const OP_OFFSET: u32 = 29u;
 const OP_VIDEO_LIMITER: u32 = 30u;
 const OP_LUMETRI: u32 = 31u;
+const OP_BEAUTY: u32 = 32u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -531,6 +538,171 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
 }
 
 // One output pixel of every op but the running-sum box blur.
+// ---- per-person beauty (`render::beauty`); 16 bilateral + 8 repair taps, independent of radius.
+
+fn beauty_ellipse(p: vec2<f32>, center: vec2<f32>, radii: vec2<f32>) -> f32 {
+    let delta = (p - center) / max(radii, vec2(1e-5));
+    return 1.0 - smoothstep_fx(0.36, 1.0, delta.x * delta.x + delta.y * delta.y);
+}
+
+fn beauty_dimensions() -> vec2<f32> {
+    return u.p2.zw * vec2<f32>(size());
+}
+
+fn beauty_feature(p: vec2<f32>) -> f32 {
+    let frame = vec2<f32>(size());
+    let dimensions = beauty_dimensions();
+    let left_eye = beauty_ellipse(p, u.p3.xy * frame, dimensions * vec2(0.13, 0.065));
+    let right_eye = beauty_ellipse(p, u.p3.zw * frame, dimensions * vec2(0.13, 0.065));
+    let nose = beauty_ellipse(p, u.p4.xy * frame, dimensions * vec2(0.065, 0.045));
+    let left = u.p4.zw * frame;
+    let right = u.p5.xy * frame;
+    let mouth = beauty_ellipse(p, (left + right) * 0.5, vec2(abs(right.x - left.x) * 0.6 + dimensions.x * 0.02, dimensions.y * 0.055));
+    return 1.0 - max(max(left_eye, right_eye), max(nose, mouth));
+}
+
+// Clamp to the selected face's snapshot bounds, exactly as the CPU ROI sampler does.
+fn beauty_sample(p: vec2<f32>) -> vec4<f32> {
+    let frame = vec2<f32>(size());
+    let first = min(vec2<i32>(floor(u.p2.xy * frame)), size() - vec2(1));
+    let last = min(vec2<i32>(ceil((u.p2.xy + u.p2.zw) * frame)) - vec2(1), size() - vec2(1));
+    let coordinate = clamp(p - vec2(0.5), vec2<f32>(first), vec2<f32>(last));
+    let point = vec2<i32>(floor(coordinate));
+    let next = min(point + vec2(1), last);
+    let t = coordinate - vec2<f32>(point);
+    let a = ld(point);
+    let b = ld(vec2(next.x, point.y));
+    let c = ld(vec2(point.x, next.y));
+    let d = ld(next);
+    return (a * (1.0 - t.x) + b * t.x) * (1.0 - t.y) + (c * (1.0 - t.x) + d * t.x) * t.y;
+}
+
+fn beauty_bilateral(p: vec2<f32>, center: vec3<f32>, radius: f32) -> vec3<f32> {
+    let taps = array<vec2<f32>, 16>(
+        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0),
+        vec2(0.71, 0.71), vec2(-0.71, 0.71), vec2(0.71, -0.71), vec2(-0.71, -0.71),
+        vec2(0.5, 0.0), vec2(-0.5, 0.0), vec2(0.0, 0.5), vec2(0.0, -0.5),
+        vec2(0.35, 0.35), vec2(-0.35, 0.35), vec2(0.35, -0.35), vec2(-0.35, -0.35)
+    );
+    var sum = center;
+    var total = 1.0;
+    let sigma = 0.065 * (1.0 + max(luma709(center), 0.0));
+    for (var index = 0u; index < 16u; index++) {
+        let pixel = beauty_sample(p + taps[index] * radius);
+        if pixel.a > 1e-6 {
+            let color = pixel.rgb / pixel.a;
+            let delta = center - color;
+            let distance = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z) / sigma;
+            let weight = pixel.a / (1.0 + distance * distance * distance * distance);
+            sum += color * weight;
+            total += weight;
+        }
+    }
+    return sum / total;
+}
+
+fn beauty_ring(p: vec2<f32>, radius: f32, fallback: vec3<f32>) -> vec3<f32> {
+    let taps = array<vec2<f32>, 8>(
+        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0),
+        vec2(0.707, 0.707), vec2(-0.707, 0.707), vec2(0.707, -0.707), vec2(-0.707, -0.707)
+    );
+    var sum = vec3(0.0);
+    var total = 0.0;
+    for (var index = 0u; index < 8u; index++) {
+        let pixel = beauty_sample(p + taps[index] * radius);
+        if pixel.a > 1e-6 {
+            // Keep the divide/multiply order of the CPU reference for nonopaque source pixels.
+            sum += (pixel.rgb / pixel.a) * pixel.a;
+            total += pixel.a;
+        }
+    }
+    if total > 1e-6 { return sum / total; }
+    return fallback;
+}
+
+fn beauty_fold_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, width: f32) -> f32 {
+    let delta = b - a;
+    let squared = delta.x * delta.x + delta.y * delta.y;
+    if squared <= 1e-6 { return 0.0; }
+    let t = clamp(((p.x - a.x) * delta.x + (p.y - a.y) * delta.y) / squared, 0.0, 1.0);
+    let closest = a + delta * t;
+    let d = p - closest;
+    let distance = sqrt(d.x * d.x + d.y * d.y) / max(width * 0.04, 0.5);
+    return (1.0 - smoothstep_fx(0.3, 1.0, distance)) * smoothstep_fx(0.0, 0.18, t) * (1.0 - smoothstep_fx(0.8, 1.0, t));
+}
+
+fn beauty_skin(color: vec3<f32>) -> f32 {
+    let positive = max(color, vec3(0.0));
+    let sum = positive.x + positive.y + positive.z;
+    if sum <= 1e-6 { return 0.0; }
+    let c = positive / sum;
+    return smoothstep_fx(-0.035, 0.025, c.x - c.z) * (1.0 - smoothstep_fx(0.10, 0.22, c.y - c.x));
+}
+
+fn beauty_op(p: vec2<i32>) -> vec4<f32> {
+    let original = ld(p);
+    if original.a <= 1e-6 { return original; }
+    let point = vec2<f32>(p) + vec2(0.5);
+    let frame = vec2<f32>(size());
+    let dimensions = beauty_dimensions();
+    let center = (u.p2.xy + u.p2.zw * 0.5) * frame;
+    let q = (point - center) / (dimensions * 0.5);
+    let mask = 1.0 - smoothstep_fx(0.72, 1.0, q.x * q.x + q.y * q.y);
+    if mask <= 0.0 { return original; }
+    let feature = beauty_feature(point);
+    var sample_point = point;
+    let slimming = u.p1.y;
+    if slimming > 0.0 {
+        let cheeks = array<vec2<f32>, 2>(u.p6.xy * frame, u.p6.zw * frame);
+        var delta = 0.0;
+        for (var index = 0u; index < 2u; index++) {
+            let cheek = cheeks[index];
+            let influence = beauty_ellipse(point, cheek, dimensions * vec2(0.32, 0.30));
+            let direction = select(1.0, -1.0, cheek.x < center.x);
+            delta += direction * influence * dimensions.x * 0.065 * slimming;
+        }
+        sample_point.x += delta * mask * feature;
+    }
+    let sampled = beauty_sample(sample_point);
+    if sampled.a <= 1e-6 { return original; }
+    let color = sampled.rgb / sampled.a;
+    var skin = 1.0;
+    if u.i1.x != 0u { skin = beauty_skin(color); }
+    let area = mask * feature * skin;
+    if area == 0.0 && all(sample_point == point) { return original; }
+    var result = color;
+    if area > 0.0 {
+        if u.p0.x > 0.0 {
+            let filtered = beauty_bilateral(sample_point, color, u.p1.w);
+            let amount = u.p0.x * (1.0 - 0.8 * u.p1.z) * area;
+            result = result * (1.0 - amount) + filtered * amount;
+        }
+        if u.p0.w > 0.0 || u.p1.x > 0.0 {
+            let radius = clamp(max(dimensions.x * 0.018, u.p1.w * 1.5), 1.0, 64.0);
+            let surround = beauty_ring(sample_point, radius, color);
+            let redness = (color.x - 0.5 * (color.y + color.z)) - (surround.x - 0.5 * (surround.y + surround.z));
+            let delta = color - surround;
+            let distance = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+            let automatic = smoothstep_fx(0.018, 0.11, redness) * (1.0 - smoothstep_fx(0.20, 0.45, distance));
+            let repair = u.p0.w * automatic * area * 0.92;
+            result = result * (1.0 - repair) + surround * repair;
+            let shadow = max(luma709(surround) - luma709(color), 0.0);
+            let fold = max(beauty_fold_segment(point, u.p7.xy * frame, u.p4.zw * frame, dimensions.x), beauty_fold_segment(point, u.p7.zw * frame, u.p5.xy * frame, dimensions.x));
+            let crease = fold * smoothstep_fx(0.005, 0.08, shadow);
+            let lift = min(shadow, 0.16 * (1.0 + max(luma709(color), 0.0))) * u.p1.x * crease * area * 0.8;
+            result += vec3(lift);
+        }
+        let light = u.p0.y * area * 0.16 / (1.0 + max(luma709(result), 0.0));
+        result += vec3(light);
+        let rose = u.p0.z * area * 0.045;
+        result += vec3(rose, -rose * 0.15, rose * 0.12);
+    }
+    let output = result * original.a;
+    // Keep an original channel if exceptional HDR arithmetic overflows, as the CPU does.
+    let finite = abs(output) <= vec3(3.402823e38);
+    return vec4(select(original.rgb, output, finite), original.a);
+}
+
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
     let pc = vec2<f32>(p) + 0.5;
@@ -705,6 +877,7 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             let res = vec3(enc_to_linear_limiter(out_enc.x), enc_to_linear_limiter(out_enc.y), enc_to_linear_limiter(out_enc.z));
             return vec4(res * a, a);
         }
+        case OP_BEAUTY: { return beauty_op(p); }
         case OP_LUMETRI: {
             let o = ld(p);
             let a = o.a;

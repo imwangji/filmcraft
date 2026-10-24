@@ -116,6 +116,10 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     if !e.enabled || img.w == 0 || img.h == 0 {
         return;
     }
+    if e.effect == "beauty" {
+        crate::beauty_effect::apply(img, e, cx);
+        return;
+    }
     if crate::vfx::apply(img, e, cx) {
         return;
     }

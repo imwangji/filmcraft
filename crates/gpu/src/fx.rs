@@ -52,6 +52,7 @@ const OP_MIRROR: u32 = 28;
 const OP_OFFSET: u32 = 29;
 const OP_VIDEO_LIMITER: u32 = 30;
 const OP_LUMETRI: u32 = 31;
+const OP_BEAUTY: u32 = 32;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
@@ -88,7 +89,7 @@ struct Step {
     run: bool,
     code: u32,
     i1: [u32; 4],
-    p: [f32; 24],
+    p: [f32; 48],
     /// Unsharp combine: reads the blurred image and the original.
     combine: bool,
     /// A blur pass of Unsharp Mask (the original stays untouched until the combine).
@@ -96,7 +97,7 @@ struct Step {
 }
 
 fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
-    let mut q = [0.0; 24];
+    let mut q = [0.0; 48];
     for (d, s) in q.iter_mut().zip(p) {
         *d = *s;
     }
@@ -116,6 +117,18 @@ fn boxes(radii: &[u32], vertical: bool, repeat: bool, out: &mut Vec<Step>) {
 fn steps(op: &FxOp) -> Vec<Step> {
     let mut out = Vec::new();
     match op {
+        FxOp::Beauty { settings, face } => {
+            let s = settings.sanitized();
+            if !s.is_identity() {
+                let mut parameters = [0.0; 32];
+                parameters[..8].copy_from_slice(&[s.smoothing, s.whitening, s.rosiness, s.blemish, s.nasolabial, s.slimming, s.detail, s.radius]);
+                parameters[8..12].copy_from_slice(&face.bounds);
+                for (dst, point) in parameters[12..].as_chunks_mut::<2>().0.iter_mut().zip(face.landmarks) {
+                    dst.copy_from_slice(&point);
+                }
+                out.push(step(OP_BEAUTY, [s.skin_only as u32, 0, 0, 0], &parameters));
+            }
+        }
         FxOp::BrightnessContrast { br, co } => out.push(step(OP_BRIGHTNESS_CONTRAST, [0; 4], &[*br, *co])),
         FxOp::ProcAmp { br, co, hue, sat } => out.push(step(OP_PROC_AMP, [0; 4], &[*br, *co, *hue, *sat])),
         FxOp::Tint { black, white, amount } => {
@@ -410,7 +423,7 @@ impl FxStage {
                 (true, Some(o)) => views.get(o)?,
                 _ => dummy,
             };
-            let mut bytes = Vec::with_capacity(128);
+            let mut bytes = Vec::with_capacity(224);
             for v in [s.code, w, h, 0].iter().chain(&s.i1) {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }

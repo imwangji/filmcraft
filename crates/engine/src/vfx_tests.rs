@@ -65,9 +65,11 @@ fn effects_list_reports_folders_and_badges() {
     assert_eq!(find("crop")["category"], json!(["Legacy", "Video Effects"]));
     assert_eq!(find("luma_key")["badges"], json!({"accelerated": true, "float32": true, "yuv": true}));
     assert_eq!(find("lens_flare")["folder"], "Lights & Glows");
+    assert_eq!(find("beauty")["category"], json!(["Video Effects", "Beauty"]));
+    assert_eq!(find("beauty")["badges"], json!({"accelerated": true, "float32": true, "yuv": true}));
     let n =
         arr.iter().filter(|e| e["kind"] == "Video" && e["category"][0] == "Video Effects" && e["folder"] != "Obsolete" && e["folder"] != Value::Null).count();
-    assert_eq!(n, 93, "Premiere 26's current Video Effects");
+    assert_eq!(n, 94, "93 baseline video effects plus per-person Beauty");
 }
 
 #[test]

@@ -37,6 +37,16 @@ pub use temporal::{StabilizerPath, clear_stabilizer_cache, stabilizer_path};
 
 /// What an effect may know about the clip beyond its own pixels.
 pub trait FxEnv: Sync {
+    /// Whether the clip's effects preserve the source coordinates used by analysed face geometry.
+    /// A geometric/temporal/generator effect requires re-mapping before targeted Beauty can run.
+    fn beauty_source_compatible(&self) -> bool {
+        true
+    }
+    /// Other assigned people in this clip. Beauty protects a peer's region even when that peer's
+    /// own effect is disabled, so adjusting A cannot retouch B during an overlap.
+    fn beauty_peers(&self, _current: &EffectInstance) -> Vec<filmcraft_project::beauty::FaceGeometry> {
+        Vec::new()
+    }
     /// The clip's layer `dt` timeline seconds from now, with the effects before `upto` applied,
     /// at the current working size. Temporal effects among those are skipped (no recursion).
     fn frame(&self, dt: f64, upto: &EffectInstance) -> Option<Image>;
@@ -90,6 +100,27 @@ pub fn is_temporal(id: &str) -> bool {
 }
 
 impl FxEnv for ItemEnv<'_> {
+    fn beauty_source_compatible(&self) -> bool {
+        filmcraft_project::beauty::source_coordinate_conflict(&self.item.effects).is_none()
+    }
+    fn beauty_peers(&self, current: &EffectInstance) -> Vec<filmcraft_project::beauty::FaceGeometry> {
+        use filmcraft_project::beauty as data;
+        let time = self.item.effect_time_at(self.t);
+        let person = data::person(current);
+        self.item
+            .effects
+            .iter()
+            .filter(|e| data::person(e).is_some() && data::person(e) != person && data::confidence_at(e, time) >= data::MIN_CONFIDENCE)
+            .filter_map(|e| match data::geometry_at(e, time) {
+                Ok(geometry) => geometry,
+                Err(error) => {
+                    log::warn!("Beauty peer geometry is invalid: {error}");
+                    None
+                }
+            })
+            .take(1)
+            .collect()
+    }
     fn frame(&self, dt: f64, upto: &EffectInstance) -> Option<Image> {
         let t2 = self.t + Tick::from_seconds_f64(dt);
         let base = crate::base_layer(self.project, self.seq, self.item, t2, self.opts, self.sources, self.want)?;

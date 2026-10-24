@@ -3063,9 +3063,19 @@ fn build() -> Vec<CommandSpec> {
                     {
                         e.params.insert(pid.clone(), filmcraft_project::Param::new(d.default.clone()));
                     }
+                    let is_beauty = e.effect == "beauty";
+                    if is_beauty && ["person", "face_path", "face_confidence", "repair_spots"].contains(&pid.as_str()) {
+                        return Err(bad("effects.setParam", "face assignments and repair spots are changed with beauty commands"));
+                    }
                     let (keyframes, v) = {
                         let prm = crate::masks::target_param(e, &pq, &pid).ok_or_else(|| bad("effects.setParam", format!("no param `{pid}`")))?;
                         let v = json_to_param(&prm.value, &val).ok_or_else(|| bad("effects.setParam", "value has the wrong type"))?;
+                        if is_beauty
+                            && let (Some(filmcraft_project::ParamKind::Float { min, max, .. }), ParamValue::Float(value)) = (def.map(|d| &d.kind), &v)
+                            && (!value.is_finite() || value < min || value > max)
+                        {
+                            return Err(bad("effects.setParam", format!("`{pid}` must be finite and within its parameter range")));
+                        }
                         let keyframes = if keyframe {
                             // the stopwatch and the value in one step
                             prm.put_keyframe(mt, v.clone());
@@ -3412,6 +3422,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::proxies::commands());
     v.extend(crate::project_manager::commands());
     v.extend(crate::masks::commands());
+    v.extend(crate::beauty::commands());
     v.extend(crate::presets::commands());
     v.extend(crate::export_tools::commands());
     v.extend(crate::transcript::commands());

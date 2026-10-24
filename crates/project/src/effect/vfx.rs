@@ -1117,7 +1117,8 @@ pub(super) fn apply_badges(v: &mut [EffectDef]) {
         let folder = e.category.get(1).copied().unwrap_or("");
         let a32 = matches!(
             id,
-            "bokeh_blur"
+            "beauty"
+                | "bokeh_blur"
                 | "channel_blur"
                 | "compound_blur"
                 | "directional_blur"
@@ -1148,7 +1149,7 @@ pub(super) fn apply_badges(v: &mut [EffectDef]) {
                 | "wiggle"
                 | "proc_amp"
         ) || folder == "Lights & Glows";
-        let yuv = matches!(id, "proc_amp" | "lumetri" | "video_limiter" | "black_white" | "alpha_adjust" | "luma_key" | "track_matte");
+        let yuv = matches!(id, "beauty" | "proc_amp" | "lumetri" | "video_limiter" | "black_white" | "alpha_adjust" | "luma_key" | "track_matte");
         let accel = match e.category.first().copied() {
             Some("Legacy") => !matches!(id, "camera_blur"),
             _ if folder == "Obsolete" => false,
@@ -1264,7 +1265,7 @@ mod tests {
         // nothing else sits in the current folders
         for d in effect_defs().iter().filter(|d| d.kind == EffectKind::Video && d.category.first() == Some(&"Video Effects")) {
             let f = d.category[1];
-            if f == "Obsolete" {
+            if f == "Obsolete" || f == "Beauty" {
                 continue;
             }
             let listed = CATALOGUE.iter().any(|(cf, names)| *cf == f && names.contains(&d.name));

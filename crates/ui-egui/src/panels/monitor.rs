@@ -302,7 +302,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         } else {
             crate::panels::graphics::monitor_overlay(app, ui, pic, frame_size);
             crate::panels::masks::monitor_overlay(app, ui, pic, frame_size);
-            crate::panels::transform_handles::monitor_overlay(app, ui, pic, frame_size);
+            crate::panels::beauty::monitor_overlay(app, ui, pic, frame_size);
+            // Face editing owns picture gestures while Beauty is selected. In particular a
+            // second face click must not become Motion's picture-wide double-click shortcut.
+            if !app.session.state.selected_effect.as_ref().is_some_and(|selected| selected.effect == "beauty") {
+                crate::panels::transform_handles::monitor_overlay(app, ui, pic, frame_size);
+            }
         }
     }
     if show_picture {

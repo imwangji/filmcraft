@@ -194,12 +194,21 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let heading = if *kind == TrackKind::Video { tl!("Video") } else { tl!("Audio") };
             bui.painter().text(pos2(hr.min.x + 8.0, hr.center().y), Align2::LEFT_CENTER, heading, Tokens::semibold(11.5), t.text_dim);
             let mt_now = it.source_time_at(ph.clamp(it.start, (it.end() - Tick(1)).max(it.start)));
+            if *kind == TrackKind::Video {
+                if it.effects.iter().any(|effect| effect.effect == "beauty") {
+                    crate::panels::beauty::clip_rows(app, bui, body, clip, it, &mut actions);
+                } else {
+                    crate::panels::beauty::clip_header(app, bui, hr, clip, it, &mut actions);
+                }
+            }
             // Premiere lists the fixed effects (Motion, Opacity, Time Remapping / Volume…) first.
             let mut order: Vec<usize> = (0..it.effects.len()).collect();
             order.sort_by_key(|i| !it.effects[*i].def().is_some_and(|d| d.intrinsic));
             for idx in order {
                 let e = &it.effects[idx];
                 let Some(def) = e.def() else { continue };
+                let auto_effect = crate::panels::beauty::automation_effect(e, idx);
+                let label = crate::panels::beauty::label(e, def.name);
                 let key = format!("{}:{}", clip.0, idx);
                 let open = !app.ui.collapsed_fx.contains(&key);
                 let selected = app.session.state.selected_effect.as_ref().is_some_and(|s| s.clip == clip && s.index(&it.effects) == Some(idx));
@@ -214,7 +223,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let tw = Rect::from_center_size(pos2(r.min.x + 10.0, r.center().y), vec2(10.0, 10.0));
                 icons::paint(bui.painter(), tw, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.text_dim);
                 let twresp = bui.interact(tw.expand(3.0), egui::Id::new(("fx-twirl", clip.0, idx)), Sense::click());
-                app.auto.add(&format!("effectControls.effect.{}.twirl", e.effect), tw, "twirl");
+                app.auto.add(&format!("effectControls.effect.{auto_effect}.twirl"), tw, "twirl");
                 // fx enable toggle
                 let fxr = Rect::from_center_size(pos2(r.min.x + 28.0, r.center().y), vec2(18.0, 14.0));
                 let fxresp = bui.interact(fxr, egui::Id::new(("fxen", clip.0, idx)), Sense::click());
@@ -226,7 +235,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     actions.push(("effects.toggleEnabled".into(), json!({"clip": clip.0, "index": idx})));
                 }
                 // (the reset button sits at the row's right end)
-                row_label(bui, pos2(r.min.x + 42.0, r.center().y), crate::i18n::t(def.name), r.max.x - 26.0 - (r.min.x + 42.0), Tokens::ui(12.0), t.text);
+                row_label(bui, pos2(r.min.x + 42.0, r.center().y), &label, r.max.x - 26.0 - (r.min.x + 42.0), Tokens::ui(12.0), t.text);
                 // reset button
                 let rr = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), vec2(16.0, 16.0));
                 let rresp = bui.interact(rr, egui::Id::new(("fxreset", clip.0, idx)), Sense::click()).on_hover_text(tl!("Reset Effect"));
@@ -234,7 +243,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if rresp.clicked() {
                     actions.push(("effects.reset".into(), json!({"clip": clip.0, "index": idx})));
                 }
-                app.auto.add(&format!("effectControls.effect.{}", e.effect), r, def.name);
+                app.auto.add(&format!("effectControls.effect.{auto_effect}"), r, &label);
+                if e.effect == "beauty" {
+                    app.auto.add(&format!("effectControls.effect.{auto_effect}.enabled"), fxr, "Enable person Beauty");
+                    app.auto.add(&format!("effectControls.effect.{auto_effect}.reset"), rr, "Reset person Beauty");
+                }
                 if twresp.clicked() {
                     if open {
                         app.ui.collapsed_fx.push(key.clone());
@@ -245,7 +258,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     actions.push(("effects.select".into(), json!({"clip": clip.0, "effect": idx})));
                 }
                 let mut save_preset = false;
-                let fx_id = e.effect.clone();
+                let fx_id = auto_effect.clone();
                 resp.context_menu(|ui| {
                     let sp = ui.button(tl!("Save Preset…"));
                     app.auto.add(&format!("effectControls.effect.{fx_id}.savePreset"), sp.rect, "Save Preset…");
@@ -267,7 +280,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if crate::panels::audio_fx_editor::has_editor(&e.effect) {
                     custom_setup_row(app, bui, body, &lane, clip, idx, &e.effect);
                 }
+                crate::panels::beauty::effect_rows(app, bui, body, clip, idx, e, it.effect_time_at(ph), &mut actions);
                 for pd in &def.params {
+                    if crate::panels::beauty::hidden_param(e, pd.id) {
+                        continue;
+                    }
                     param_row(app, bui, body, clip, idx, e, None, pd, mt_now, &mut actions, &lane, &lx, it, &mut keys);
                     if app.ui.expanded_fx.contains(&graph_key(clip, idx, pd.id))
                         && let Some(param) = e.params.get(pd.id)
@@ -524,6 +541,7 @@ pub(crate) fn param_row(
 ) {
     let _ = lx;
     let t = app.tokens;
+    let auto_effect = crate::panels::beauty::automation_effect(e, idx);
     let param = match mask {
         Some(k) => e.masks.get(k).and_then(|m| m.param(pd.id)),
         None => e.params.get(pd.id),
@@ -555,7 +573,7 @@ pub(crate) fn param_row(
         let tw = Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(12.0, 12.0));
         let tresp = ui.interact(tw.expand(2.0), egui::Id::new(("twirl", clip.0, idx, pkey)), Sense::click()).on_hover_text(tl!("Show graphs"));
         icons::paint(ui.painter(), tw, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.text_dim);
-        app.auto.add(&format!("effectControls.{}.{}.graphs", e.effect, pkey), tw, "Show graphs");
+        app.auto.add(&format!("effectControls.{auto_effect}.{pkey}.graphs"), tw, "Show graphs");
         if tresp.clicked() {
             if open {
                 app.ui.expanded_fx.retain(|k| *k != key);
@@ -571,7 +589,7 @@ pub(crate) fn param_row(
         if resp.clicked() {
             actions.push(("effects.toggleAnimation".into(), with_mask(json!({"clip": clip.0, "effect": idx, "param": pd.id}))));
         }
-        app.auto.add(&format!("effectControls.{}.{}.stopwatch", e.effect, pkey), sw, "Toggle animation");
+        app.auto.add(&format!("effectControls.{auto_effect}.{pkey}.stopwatch"), sw, "Toggle animation");
     }
     x += 14.0;
     let vx = r.min.x + (r.width() * 0.5).max(150.0);
@@ -584,10 +602,12 @@ pub(crate) fn param_row(
     );
     let id = egui::Id::new(("pv", clip.0, idx, pkey));
     let mut set: Option<Value> = None;
+    let mut value_response = None;
     match (&pd.kind, &value) {
         (ParamKind::Float { min, max, soft_min, soft_max, unit, decimals }, ParamValue::Float(v)) => {
             let speed = ((soft_max - soft_min) / 400.0).max(0.01);
-            let (_, nv) = crate::widgets::hot_number(&mut vui, id, *v, speed, (*min, *max), *decimals as usize, unit, &t);
+            let (response, nv) = crate::widgets::hot_number(&mut vui, id, *v, speed, (*min, *max), *decimals as usize, unit, &t);
+            value_response = Some(response);
             if let Some(nv) = nv {
                 set = Some(json!(nv));
             }
@@ -608,9 +628,11 @@ pub(crate) fn param_row(
         (ParamKind::Bool, ParamValue::Bool(b)) => {
             let mut v = *b;
             fit_to_row(&mut vui);
-            if vui.checkbox(&mut v, "").changed() {
+            let response = vui.checkbox(&mut v, "");
+            if response.changed() {
                 set = Some(json!(v));
             }
+            value_response = Some(response);
         }
         (ParamKind::Choice(opts), ParamValue::Choice(c)) => {
             let mut sel = *c as usize;
@@ -634,7 +656,7 @@ pub(crate) fn param_row(
             let target = crate::state::Eyedropper { clip: clip.0, effect: idx, param: pd.id.to_string(), mask };
             let armed = app.ui.eyedropper.as_ref() == Some(&target);
             let drop = icons::button(&mut vui, Icon::Eyedropper, 18.0, armed, &t, tl!("Eyedropper (pick a color from the Program monitor)"));
-            app.auto.add(&format!("effectControls.{}.{}.eyedropper", e.effect, pkey), drop.rect, "Eyedropper");
+            app.auto.add(&format!("effectControls.{auto_effect}.{pkey}.eyedropper"), drop.rect, "Eyedropper");
             if drop.clicked() {
                 app.ui.eyedropper = if armed { None } else { Some(target) };
             }
@@ -662,6 +684,11 @@ pub(crate) fn param_row(
             vui.label(param_text(&app.session.project, pd.id, &value));
         }
     }
+    if e.effect == "beauty"
+        && let Some(response) = value_response
+    {
+        app.auto.add_response(&format!("effectControls.{auto_effect}.{pkey}.value"), &response, pd.label);
+    }
     if let Some(v) = set {
         actions.push(("effects.setParam".into(), with_mask(json!({"clip": clip.0, "effect": idx, "param": pd.id, "value": v}))));
     }
@@ -669,7 +696,7 @@ pub(crate) fn param_row(
     let eff_json = json!(idx);
     if pd.animatable && param.is_animated() {
         let at = pos2(r.max.x - 42.0, r.center().y);
-        let auto = format!("effectControls.{}.{}", e.effect, pkey);
+        let auto = format!("effectControls.{auto_effect}.{pkey}");
         if keyframe_nav(app, ui, at, Some(param), mt, it, egui::Id::new(("knav", clip.0, idx, pkey)), &auto, "Add/Remove Keyframe", actions) {
             actions.push(("effects.addKeyframe".into(), with_mask(json!({"clip": clip.0, "effect": eff_json, "param": pd.id}))));
         }
@@ -680,7 +707,7 @@ pub(crate) fn param_row(
         let rr = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), vec2(12.0, 12.0));
         let rresp = ui.interact(rr, egui::Id::new(("param-reset", clip.0, idx, pkey)), Sense::click()).on_hover_text(tl!("Reset Parameter"));
         icons::paint(ui.painter(), rr, Icon::Reset, if rresp.hovered() { t.text } else { t.text_dim });
-        app.auto.add(&format!("effectControls.{}.{}.reset", e.effect, pkey), rr, "Reset Parameter");
+        app.auto.add(&format!("effectControls.{auto_effect}.{pkey}.reset"), rr, "Reset Parameter");
         if rresp.clicked() {
             actions.push(("effects.resetParam".into(), json!({"clip": clip.0, "effect": eff_json, "param": pd.id})));
         }
@@ -700,7 +727,7 @@ pub(crate) fn param_row(
             let resp = ui.interact(original.expand(2.0), id, Sense::click_and_drag());
             let reference = KeyframeRef { clip: clip.0, effect: idx, param: pd.id.to_string(), mask, time: k.time };
             let kr = keys.key(app, ui, reference.clone(), it, *lane, original, &resp, k.interp);
-            app.auto.add(&format!("effectControls.{}.{}.keyframe.{}", e.effect, pkey, k.time.0), kr, "keyframe");
+            app.auto.add(&format!("effectControls.{auto_effect}.{pkey}.keyframe.{}", k.time.0), kr, "keyframe");
             let selected = app.ui.keyframe_selection.contains(&reference);
             let col = if selected { t.hot_text } else { Color32::from_rgb(0xb0, 0xb0, 0xb0) };
             selection::paint(ui.painter(), kr, k.interp, col);
@@ -1184,10 +1211,15 @@ pub(crate) fn graph_rows(
             resp.context_menu(|ui| {
                 keyframe_menu(app, ui, KeyframeRef { clip: clip.0, effect: idx, param: pd.id.to_string(), mask, time: k.time }, actions);
             });
+            let auto_param = it
+                .effects
+                .get(idx)
+                .filter(|e| e.effect == "beauty")
+                .map_or_else(|| pd.id.to_string(), |e| format!("{}.{}", crate::panels::beauty::automation_effect(e, idx), pd.id));
             let auto_id = match (comps.len(), ci) {
-                (1, _) => format!("effectControls.{}.graph.keyframe.{}", pd.id, k.time.0),
-                (_, 0) => format!("effectControls.{}.graph.keyframe.{}.x", pd.id, k.time.0),
-                _ => format!("effectControls.{}.graph.keyframe.{}.y", pd.id, k.time.0),
+                (1, _) => format!("effectControls.{auto_param}.graph.keyframe.{}", k.time.0),
+                (_, 0) => format!("effectControls.{auto_param}.graph.keyframe.{}.x", k.time.0),
+                _ => format!("effectControls.{auto_param}.graph.keyframe.{}.y", k.time.0),
             };
             app.auto.add(&auto_id, r, "keyframe value");
             // influence handles: flat (ease) tangents with length ∝ influence × neighbouring segment;

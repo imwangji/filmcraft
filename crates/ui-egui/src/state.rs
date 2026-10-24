@@ -413,6 +413,13 @@ pub struct Eyedropper {
     pub mask: Option<usize>,
 }
 
+/// The person whose blemishes the next Program-monitor click repairs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeautyRepairTarget {
+    pub clip: u64,
+    pub person: String,
+}
+
 /// A keyframe selected in the Effect Controls keyframe lane: clip, effect index, parameter (of an
 /// effect mask when `mask` is set) and the keyframe's media time. The panel drops references that
 /// no longer match a keyframe (deleted, moved, another clip selected).
@@ -476,6 +483,9 @@ pub struct UiState {
     /// monitor (Esc or a click elsewhere disarms it). Never saved.
     #[serde(skip)]
     pub eyedropper: Option<Eyedropper>,
+    /// Beauty spot-repair mode; exposed to UI automation and cancelled by Escape.
+    #[serde(default)]
+    pub beauty_repair: Option<BeautyRepairTarget>,
     /// Effect Controls: the selected keyframes, highlighted in the keyframe lane (a click selects one).
     #[serde(default)]
     pub keyframe_selection: Vec<KeyframeRef>,
@@ -980,6 +990,7 @@ impl Default for UiState {
             status: String::new(),
             failed_link: None,
             eyedropper: None,
+            beauty_repair: None,
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
             tts: Default::default(),

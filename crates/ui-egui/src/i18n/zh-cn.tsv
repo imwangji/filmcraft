@@ -3587,3 +3587,28 @@
 	Open this address in your browser yourself:	请自行在浏览器中打开此地址：
 	Return to Previous Timeline Zoom	恢复上一次时间线缩放
 	Zoom to Time Range	缩放到时间范围
+	Beauty	美颜
+	Person	人物
+	Detect Faces	检测人脸
+	Download Face Models	下载人脸模型
+	Track Both	跟踪两人
+	Smoothing	磨皮
+	Whitening	美白
+	Rosiness	红润
+	Blemish Removal	祛痘
+	Nasolabial Fold Reduction	淡化法令纹
+	Face Slimming	瘦脸
+	Skin Only	仅处理肤色
+	Select a person, or add a face region manually	请选择人物，或手动添加人脸区域
+	◀ Track	◀ 向后跟踪
+	Track ▶	向前跟踪 ▶
+	Check face region	请检查人脸区域
+	Drag the face box or its corners to adjust	拖动人脸框或其角点以调整区域
+	Repair Spot	局部修复
+	Clear Repair Spots	清除修复点
+	Click a blemish inside the selected face; Esc finishes	点击所选人脸内的瑕疵，按 Esc 结束
+	Choose a blemish inside the selected face region	请选择所选人脸区域内的瑕疵
+	Disable geometric effects before per-person Beauty	请先停用几何特效，再分别美颜
+	Detail	保留细节
+	Detect Beauty Faces	检测美颜人脸
+	Track Beauty Faces	跟踪美颜人脸

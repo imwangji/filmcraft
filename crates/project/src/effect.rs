@@ -237,6 +237,7 @@ fn audio(id: &'static str, name: &'static str, cat: &'static [&'static str], par
 }
 
 const ADJUST: &[&str] = &["Video Effects", "Adjust"];
+const BEAUTY: &[&str] = &["Video Effects", "Beauty"];
 const BLUR: &[&str] = &["Video Effects", "Blur & Sharpen"];
 const COLOR_CORR: &[&str] = &["Video Effects", "Color Correction"];
 const DISTORT: &[&str] = &["Video Effects", "Distort"];
@@ -801,6 +802,23 @@ fn build_effects() -> Vec<EffectDef> {
             vec![pt("position", "Position", f64::NAN, f64::NAN), fs("size", "Size", 15.0, (1.0, 100.0), (1.0, 50.0), "%", 1)],
         ),
         video("simple_text", "Simple Text", vfx::UTILITY, vec![]),
+        // ---- FilmCraft's own effects (Premiere has no equivalent) ----
+        video(
+            "beauty",
+            "Beauty",
+            BEAUTY,
+            vec![
+                fs("smoothing", "Smoothing", 0.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                fs("radius", "Radius", 4.0, (1.0, 20.0), (1.0, 20.0), "", 0),
+                fs("detail", "Detail", 40.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                fs("whitening", "Whitening", 0.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                fs("rosiness", "Rosiness", 0.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                fs("blemish", "Blemish Removal", 0.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                fs("nasolabial", "Nasolabial Fold Reduction", 0.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                fs("slimming", "Face Slimming", 0.0, (0.0, 100.0), (0.0, 100.0), "%", 0),
+                b("skin_only", "Skin Only", true),
+            ],
+        ),
         // ---- audio effects ----
         // (defined in effect/audio.rs; appended below)
         EffectDef {
@@ -844,7 +862,7 @@ fn build_effects() -> Vec<EffectDef> {
     v.extend(crate::graphic::layer_defs());
     // YUV badge for the colour/intrinsic set
     for e in &mut v {
-        if matches!(e.id, "brightness_contrast" | "proc_amp" | "crop" | "gaussian_blur" | "tint" | "lumetri") {
+        if matches!(e.id, "brightness_contrast" | "proc_amp" | "crop" | "gaussian_blur" | "tint" | "lumetri" | "beauty") {
             e.yuv = true;
         }
     }

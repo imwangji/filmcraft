@@ -32,6 +32,11 @@ pub struct Resample {
 /// One evaluated effect.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FxOp {
+    /// Per-person retouching; geometry and settings are shared with the CPU reference.
+    Beauty {
+        settings: crate::beauty::BeautySettings,
+        face: crate::beauty::FaceRegion,
+    },
     BrightnessContrast {
         br: f32,
         co: f32,
@@ -201,6 +206,7 @@ pub enum FxOp {
 
 /// Effect ids [`FxOp::eval`] understands (the GPU-capable standard effects).
 pub const GPU_EFFECTS: &[&str] = &[
+    "beauty",
     "brightness_contrast",
     "proc_amp",
     "tint",
@@ -266,6 +272,10 @@ impl FxOp {
             return None;
         }
         Some(match e.effect.as_str() {
+            "beauty" => {
+                let (settings, face) = crate::beauty_effect::evaluate(e, cx)?;
+                FxOp::Beauty { settings, face }
+            }
             "brightness_contrast" => FxOp::BrightnessContrast { br: f(e, "brightness", cx) / 100.0 * 0.4, co: 1.0 + f(e, "contrast", cx) / 100.0 },
             "proc_amp" => FxOp::ProcAmp {
                 br: f(e, "brightness", cx) / 100.0 * 0.4,
@@ -590,6 +600,10 @@ impl FxOp {
     pub fn gpu_ok(&self) -> bool {
         let fin = |v: &[f32]| v.iter().all(|x| x.is_finite());
         match self {
+            // Manual repair points and overlapping peer boxes conservatively use the CPU reference.
+            FxOp::Beauty { settings, face } => {
+                face.validate().is_ok() && face.repair_spots.is_empty() && face.exclusions.is_empty() && settings.sanitized() == *settings
+            }
             FxOp::BrightnessContrast { br, co } => fin(&[*br, *co]),
             FxOp::ProcAmp { br, co, hue, sat } => fin(&[*br, *co, *hue, *sat]),
             FxOp::Tint { black, white, amount } => fin(black) && fin(white) && amount.is_finite(),
@@ -637,6 +651,11 @@ impl FxOp {
             return;
         }
         match self {
+            FxOp::Beauty { settings, face } => {
+                if let Err(error) = crate::beauty::process(img, *settings, Some(face)) {
+                    log::warn!("Beauty could not render: {error}");
+                }
+            }
             FxOp::BrightnessContrast { br, co } => {
                 let (br, co) = (*br, *co);
                 img.map_rgb(|c, _, _| {

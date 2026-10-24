@@ -83,6 +83,9 @@ OS window or prove physical-keyboard delivery.
 Element ids are stable, e.g. `timeline.clip.<id>`, `timeline.track.V1.lock`, `tools.Razor`,
 `project.item.<id>`, `effects.item.gaussian_blur`, `panel.tab.Timeline`, `program.transport.playback.toggle`.
 
+Independent portrait controls use `beauty.*` commands and per-person automation ids; see
+[Per-person beauty](beauty.md) for model setup, A/B assignment, tracking and repair spots.
+
 Audio mixing: `mixer.*` commands (strips `"A1"`, `"S1"`, `"Mix"` or ids; lanes `volume`, `pan`,
 `mute`, `send.<i>.level`, `fx.<slot>.<param>`): `mixer.inspect`, `mixer.setStrip` (volume, pan, mute,
 solo, record arm, solo safe, mode Off/Read/Latch/Touch/Write, output, input map, channels),

@@ -44,6 +44,7 @@ pub(crate) fn effect_rows(
     keys: &mut crate::panels::effect_controls::Interaction,
 ) {
     let t = app.tokens;
+    let auto_effect = crate::panels::beauty::automation_effect(e, idx);
     // creation tools: ellipse, 4-point polygon, free-draw Bézier
     let (r, _) = ui.allocate_exact_size(vec2(body.width(), ROW_H), Sense::hover());
     crate::panels::effect_controls::row_line(ui, r, lane, &t);
@@ -63,7 +64,7 @@ pub(crate) fn effect_rows(
         }
         let on = kind == "pen" && pen_on;
         icons::paint(ui.painter(), br.shrink(3.0), icon, if on { t.accent } else { t.icon });
-        app.auto.add(&format!("effectControls.{}.mask.{kind}", e.effect), br, tip);
+        app.auto.add(&format!("effectControls.{auto_effect}.mask.{kind}"), br, tip);
         if resp.clicked() {
             if kind == "pen" {
                 app.ui.mask_pen = if on { None } else { Some(crate::state::MaskPenDraft { clip: clip.0, effect: idx, points: vec![] }) };
@@ -111,7 +112,7 @@ pub(crate) fn effect_rows(
             Tokens::ui(12.0),
             t.text,
         );
-        let base = format!("effectControls.{}.mask{k}", e.effect);
+        let base = format!("effectControls.{auto_effect}.mask{k}");
         app.auto.add(&base, r, &m.name);
         // mode
         let mr = Rect::from_min_size(pos2(r.max.x - 118.0, r.min.y + 2.0), vec2(96.0, ROW_H - 4.0));
@@ -758,7 +759,7 @@ pub fn path_value(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip: ClipId, effec
     let Some(it) = app.session.active_sequence().and_then(|q| q.find_item(clip)).map(|(_, i)| i.clone()) else { return };
     let Some(e) = it.effects.get(effect) else { return };
     let Some(m) = e.masks.get(k) else { return };
-    let base = format!("effectControls.{}.mask{k}", e.effect);
+    let base = format!("effectControls.{}.mask{k}", crate::panels::beauty::automation_effect(e, effect));
     let target = filmcraft_engine::masks::MaskSel { clip, effect, mask: k };
     let running = app.session.mask_jobs.iter().find(|j| j.target == target).map(|j| j.job);
     for (icon, dir, frames, id, tip) in [

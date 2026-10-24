@@ -407,6 +407,7 @@ pub fn effect_cost_ms(id: &str) -> f64 {
         | "directional_blur"
         | "camera_blur"
         | "median"
+        | "beauty"
         // M5.11 (multi-pass, multi-frame or analysis effects)
         | "bokeh_blur"
         | "compound_blur"

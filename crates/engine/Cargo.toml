@@ -17,6 +17,8 @@ whisper = ["filmcraft-speech/whisper"]
 speech-download = ["filmcraft-speech/download"]
 # Natural voices for Text to Speech: Kokoro-82M on candle (CPU) and their download.
 neural-voices = ["filmcraft-tts/kokoro", "speech-download"]
+# Offline face models and their verified downloader (native only; WASM keeps manual face regions).
+face-analysis = ["filmcraft-face-analysis/mediapipe", "speech-download", "dep:sha2"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -37,15 +39,18 @@ filmcraft-format = { workspace = true }
 filmcraft-interchange = { workspace = true }
 filmcraft-captions = { workspace = true }
 filmcraft-speech = { workspace = true }
+filmcraft-face-analysis = { workspace = true }
+sha2 = { version = "0.10", optional = true }
 filmcraft-tts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 web-time = "1"
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }
 filmcraft-dng = { workspace = true, features = ["writer"] }
 filmcraft-isobmff = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg"] }
