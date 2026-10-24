@@ -1,0 +1,84 @@
+# Exercise the desktop's default features (including offline face analysis) on both Mac CPUs.
+# This uses the normal packager with ad-hoc signing and keeps test artifacts for seven days.
+name: macOS build
+
+on:
+  push:
+    branches: [main, "codex/**"]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - "crates/**"
+      - "apps/**"
+      - "assets/**"
+      - "packaging/macos/**"
+      - packaging/env.sh
+      - .github/workflows/macos-build.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - "crates/**"
+      - "apps/**"
+      - "assets/**"
+      - "packaging/macos/**"
+      - packaging/env.sh
+      - .github/workflows/macos-build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: aarch64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "3"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: macos-${{ matrix.target }}
+      - name: Build desktop and CLI with default features
+        run: cargo build --locked --release --target "$TARGET" -p filmcraft -p filmcraft-cli
+      - name: Test the native face-analysis backend
+        run: cargo test --locked --release --target "$TARGET" -p filmcraft-face-analysis --all-features -- --test-threads=1
+      - name: Package and verify the app
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          bash packaging/macos/package.sh --arch "$PACKAGE_ARCH" --skip-build
+          "target/$TARGET/release/filmcraft" --version
+      - name: Upload test packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: filmcraft-macos-${{ matrix.arch }}
+          path: |
+            dist/release/*.dmg
+            dist/release/*.zip
+          if-no-files-found: error
+          retention-days: 7
